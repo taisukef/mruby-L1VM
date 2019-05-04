@@ -22,6 +22,9 @@ Try your mrb file (mruby binary) compiled by mrbc (mruby compiler 2.0.1)
 Runs on IchigoJam! (Arm Cortex-M0 ROM32KB/RAM4KB LPC1114 by NXP)  
 https://fukuno.jig.jp/2475  
 
+Runs with IchigoJam BASIC!  
+https://fukuno.jig.jp/2476  
+
 ## license
 
 MIT license  

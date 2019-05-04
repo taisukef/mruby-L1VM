@@ -28,23 +28,26 @@
 ** [ MIT license: http://www.opensource.org/licenses/mit-license.php ]
 */
 
-
-#ifdef USE_STDIO
-#include <string.h>
-#else
+#ifndef USE_STDIO
 #include "typedef.h"
 #endif
 
-//#define SUPPORT_STRCAT
+int mrb_strcmp(const char* buf1, const char* buf2);
+
+// option
+//#define SUPPORT_CONST
+//#define SUPPORT_CLASS
+
+// TBD options
+//#define SUPPORT_STRCAT // need alloc/free/strcat TBD
 //#define SUPPORT_ARRAY // TBD
 //#define SUPPORT_HASH // TBD
 //#define SUPPORT_RANGE // TBD
 //#define SUPPORT_OVER64KB // TBD
 //#define SUPPORT_SENDV // TBD
-//#define SUPPORT_CLASS // TBD
 //#define SUPPORT_GLOBALVAR // TBD
 
-#define MAX_USERDEF_METHOD 4
+#define MAX_USERDEF 20 // *12 byte memory
 
 static inline int b2l2(const uint8_t* n) {
 	return (n[0] << 8) | n[1];
@@ -78,6 +81,10 @@ enum {
 	OP_LOADSELF,
 	OP_LOADT,
 	OP_LOADF,
+	OP_GETIV = 23,
+	OP_SETIV,
+	OP_GETCONST = 27,
+	OP_SETCONST,
 	OP_GETUPVAR = 31,
 	OP_SETUPVAR,
 	OP_JMP,
@@ -118,7 +125,9 @@ enum {
 	OP_METHOD,
 	OP_RANGE_INC,
 	OP_RANGE_EXC,
-	OP_DEF = 93,
+	OP_CLASS = 90,
+	OP_EXEC = 92,
+	OP_DEF,
 	OP_TCLASS = 97,
 	OP_EXT1 = 100,
 	OP_EXT2,
@@ -236,40 +245,92 @@ enum {
 	MRB_ERR_NOERR,
 	MRB_ERR_UNSUPPORTED_OPCODE,
 	MRB_ERR_NO_METHOD,
-	MRB_ERR_EXCEED_MAX_METHOD,
+	MRB_ERR_EXCEED_MAX_USEROBJECT,
+};
+
+enum {
+	MRB_OBJ_CONST,
+	MRB_OBJ_OBJECT,
+	MRB_OBJ_GLOBAL,
+	MRB_OBJ_USER, // last
 };
 
 struct mrb_vm {
-	int nmethod;
-	const char* methodsym[MAX_USERDEF_METHOD];
-	intptr_t methodirep[MAX_USERDEF_METHOD];
 	int err;
+
+	int nmemory;
+	intptr_t memory[MAX_USERDEF * 3]; // obj, const char*, value
+
+#ifdef SUPPORT_CLASS
+	int nobject;
+#endif
+
+	void* userdata; // You can use freely!!
 };
+
+intptr_t* mrb_memory_find(struct mrb_vm* vm, intptr_t obj, const char* name) {
+	intptr_t* mem = vm->memory;
+	for (int i = 0; i < vm->nmemory * 3; i += 3) {
+		if (mem[i] == obj && mrb_strcmp((const char*)mem[i + 1], name) == 0) {
+			x_printf("get[ %ld %s %ld]\n", obj, (const char*)name, mem[i + 2]);
+			return mem + i;
+		}
+	}
+	return NULL;
+}
+int mrb_memory_add(struct mrb_vm* vm, intptr_t obj, const char* name, intptr_t val) { // 0 when out of memory
+	x_printf("add[ %ld %s %ld]\n", obj, (const char*)name, val);
+	intptr_t* chk = mrb_memory_find(vm, obj, name);
+	if (chk) {
+		chk[2] = val;
+	x_printf("hit %ld\n", val);
+		return 1;
+	}
+	x_printf("nohit %ld\n", val);
+	if (vm->nmemory == MAX_USERDEF) {
+		x_printf("exceed max user object!!\n");
+		vm->err = MRB_ERR_EXCEED_MAX_USEROBJECT;
+		return 0;
+	}
+	intptr_t* mem = vm->memory + vm->nmemory * 3;
+	*mem++ = obj;
+	*mem++ = (intptr_t)name;
+	*mem++ = val;
+	vm->nmemory++;
+	return 1;
+}
 
 // for 32bit
 #define MRB_NIL 0x80000000 // this is ruby!
-//#define MRB_NIL 0 // like C (just -4 byte)
+//#define MRB_NIL 80000000 // for debug, +4byte
+//#define MRB_NIL 0 // like C (-20 byte)
+
 #define MRB_FALSE MRB_NIL
 #define MRB_TRUE 1
 
-#define mrb_vm_init(pvm) { (pvm)->nmethod = 0; (pvm)->err = 0; }
+#ifdef SUPPORT_CLASS
+#define mrb_vm_init(pvm) { (pvm)->err = 0; (pvm)->nmemory = 0; (pvm)->nobject = MRB_OBJ_USER; }
+#else
+#define mrb_vm_init(pvm) { (pvm)->err = 0; (pvm)->nmemory = 0; }
+#endif
 
 intptr_t irep_atol(const char* s);
 
 int irep_exec(struct mrb_vm* vm, const uint8_t* irep, struct mrb_state* parent, int paramreg);
 
 intptr_t num_times(struct mrb_vm* vm, intptr_t n, const uint8_t* irep, struct mrb_state* parent) {
-	intptr_t reg[2];
+	intptr_t reg[3];
 	struct mrb_state state = { .parent = parent, .reg = reg };
 	intptr_t ret = 0;
+	reg[1] = MRB_NIL;
 	for (int i = 0; i < n; i++) {
-		reg[1] = i;
+		reg[2] = i;
 		ret = irep_exec(vm, irep, &state, 1);
 	}
 	return ret;
 }
 
-void emb_method(struct mrb_vm* vm, const char* func, intptr_t* reg, int a);
+void emb_method(struct mrb_vm* vm, const char* func, intptr_t* reg, int paramreg, int paramlen);
 
 int irep_exec(struct mrb_vm* vm, const uint8_t* irep, struct mrb_state* parent, int paramreg) {
 	const uint8_t* p = irep;
@@ -297,7 +358,8 @@ int irep_exec(struct mrb_vm* vm, const uint8_t* irep, struct mrb_state* parent, 
 	int32_t c = 0;
 	int opext = 0;
 	const uint8_t* porg = p;
-	reg[0] = MRB_NIL; // self instance  0 means root object // vm->parentstate ? parentstate->caller : 0;
+	reg[0] = paramreg ? parent->reg[paramreg] : MRB_OBJ_OBJECT; // self instance  0 means root object // vm->parentstate ? parentstate->caller : 0;
+	//x_printf("irep_exec self:%ld (%d)\n", reg[0], paramreg);
 	for (;;) {
 		x_printf("%3ld:%3d ", (intptr_t)(p - porg), *p);
 		uint8_t op = *p++;
@@ -341,8 +403,8 @@ int irep_exec(struct mrb_vm* vm, const uint8_t* irep, struct mrb_state* parent, 
 				break;
 			case OP_LOADSYM:
 				a = *p++; b = *p++;
-				reg[a] = (intptr_t)irep_get(irep, IREP_TYPE_SYMBOL, b);
-				x_printf("r[%d] = sym[%d]\n", a, b);
+				reg[a] = (intptr_t)(irep_get(irep, IREP_TYPE_SYMBOL, b) + 2);
+				x_printf("r[%d] = sym[%d] %s\n", a, b, (const char*)reg[a]);
 				break;
 			case OP_LOADNIL:
 				a = *p++;
@@ -352,7 +414,7 @@ int irep_exec(struct mrb_vm* vm, const uint8_t* irep, struct mrb_state* parent, 
 			case OP_LOADSELF:
 				a = *p++;
 				reg[a] = reg[0];
-				x_printf("r[%d] = self\n", a);
+				x_printf("r[%d] = self %ld\n", a, reg[a]);
 				break;
 			case OP_LOADT:
 			case OP_LOADF:
@@ -360,6 +422,39 @@ int irep_exec(struct mrb_vm* vm, const uint8_t* irep, struct mrb_state* parent, 
 				reg[a] = op == OP_LOADT;
 				x_printf("r[%d] = %s\n", a, op == OP_LOADT ? "true" : "false");
 				break;
+#ifdef SUPPORT_CLASS
+			case OP_GETIV: // OPCODE(GETIV,      BB)       /* R(a) = ivget(Syms(b)) */
+				a = *p++; b = *p++;
+				const char* iconst = (const char*)(irep_get(irep, IREP_TYPE_SYMBOL, b) + 2);
+				intptr_t* iv = mrb_memory_find(vm, reg[0], iconst);
+				if (iv)
+					reg[a] = iv[2];
+				x_printf("r[%d]:%ld = %ld.ivtget(sym[%d]:%s)\n", a, reg[a], reg[0], b, iconst);
+				break;
+			case OP_SETIV: // OPCODE(SETIV,      BB)       /* ivset(Syms(b),R(a)) */
+				a = *p++; b = *p++;
+				const char* iconst2 = (const char*)(irep_get(irep, IREP_TYPE_SYMBOL, b) + 2);
+				x_printf("%ld.ivtset(sym[%d]:%s, r[%d]:%ld)\n", reg[0], b, iconst2, a, reg[a]);
+				mrb_memory_add(vm, reg[0], iconst2, reg[a]);
+				break;
+#endif
+#ifdef SUPPORT_CONST
+			case OP_GETCONST: //  class is const, 	OPCODE(GETCONST,   BB)       /* R(a) = constget(Syms(b)) */
+				a = *p++; b = *p++;
+				const char* sconst = (const char*)(irep_get(irep, IREP_TYPE_SYMBOL, b) + 2);
+				intptr_t* gc = mrb_memory_find(vm, MRB_OBJ_CONST, sconst);
+				if (gc)
+					reg[a] = gc[2];
+				x_printf("r[%d] = constget(sym[%d]:%s)\n", a, b, sconst);
+				break;
+			case OP_SETCONST: // OPCODE(SETCONST,   BB)       /* constset(Syms(b),R(a)) */
+				a = *p++; b = *p++;
+				const char* sconst2 = (const char*)(irep_get(irep, IREP_TYPE_SYMBOL, b) + 2);
+				mrb_memory_add(vm, MRB_OBJ_CONST, sconst2, reg[a]);
+				// warn if defined
+				x_printf("constset(sym[%d]:%s, r[%d])\n", b, sconst2, a);
+				break;
+#endif
 			case OP_GETUPVAR: // OPCODE(GETUPVAR,   BBB)      /* R(a) = uvget(b,c) */
 			case OP_SETUPVAR: // OPCODE(SETUPVAR,   BBB)      /* uvset(b,c,R(a)) */
 				a = *p++; b = *p++; c = *p++;
@@ -376,19 +471,19 @@ int irep_exec(struct mrb_vm* vm, const uint8_t* irep, struct mrb_state* parent, 
 				}
 				break;
 			case OP_JMP:
-				a = *p++; b = (a << 8) + *p++;
-				p = porg + b;
+				a = *p++; a = (a << 8) | *p++;
+				p = porg + a;
 				x_printf("jmp %d\n", b);
 				break;
 			case OP_JMPIF:
 			case OP_JMPNOT:
-				a = *p++; b = *p++; c = (b << 8) + *p++;
+				a = *p++; b = *p++; b = (b << 8) | *p++;
 				if (op == OP_JMPIF)
-					x_printf("jmp %d if r[%d] == %ld\n", c, a, reg[a]);
+					x_printf("jmp %d if r[%d] == %ld\n", b, a, reg[a]);
 				else
-					x_printf("jmp %d if !r[%d] == %ld\n", c, a, reg[a]);
+					x_printf("jmp %d if !r[%d] == %ld\n", b, a, reg[a]);
 				if ((op == OP_JMPIF) == (reg[a] != MRB_NIL)) {
-					p = porg + c;
+					p = porg + b;
 				}
 				break;
 #ifdef SUPPORT_SENDV
@@ -403,26 +498,57 @@ int irep_exec(struct mrb_vm* vm, const uint8_t* irep, struct mrb_state* parent, 
 #endif
 			case OP_SEND:
 				a = *p++; b = *p++; c = *p++;
-				if (c)
-					x_printf("r[%d] = r[%d].sym[%d](r[%d]-r[%d])\n", a, a, b, a + 1, a + c);
-				else
-					x_printf("r[%d] = r[%d].sym[%d]()\n", a, a, b);
 				const char* func = (const char*)(irep_get(irep, IREP_TYPE_SYMBOL, b) + 2);
-				x_printf("func:%s %ld\n", func, reg[a + 1]);
+				if (c)
+					x_printf("r[%d] = r[%d].sym[%d:%s](r[%d]:%ld-r[%d])\n", a, a, b, func, a + 1, reg[a + 1], a + c);
+				else
+					x_printf("r[%d] = r[%d].sym[%d:%s]()\n", a, a, b, func);
 				
-				int sendflg = 0;
-				for (int i = 0; i < vm->nmethod; i++) {
-					if (mrb_strcmp(vm->methodsym[i], func) == 0) {
-						//x_printf("hit! %d blk:%ld\n", i, methodirep[i]);
-						reg[a] = irep_exec(vm, (const uint8_t*)vm->methodirep[i], &state, a + 1);
-						//x_printf("ret %ld\n", reg[a]);
-						sendflg = 1;
+#ifdef SUPPORT_CLASS
+				intptr_t* fobj = mrb_memory_find(vm, reg[a], func);
+				if (fobj) {
+					reg[a] = irep_exec(vm, (const uint8_t*)fobj[2], &state, a);
+					break;
+				}
+				intptr_t* send = mrb_memory_find(vm, reg[a], "_cls");
+				if (send) {
+					intptr_t* fsend = mrb_memory_find(vm, send[2], func);
+					if (fsend) {
+						reg[a] = irep_exec(vm, (const uint8_t*)fsend[2], &state, a);
 						break;
 					}
 				}
-				if (!sendflg) {
-					emb_method(vm, func, reg, a);
+#endif
+				intptr_t* send2 = mrb_memory_find(vm, MRB_OBJ_OBJECT, func);
+				if (send2) {
+					reg[a] = irep_exec(vm, (const uint8_t*)send2[2], &state, a);
+					break;
 				}
+#ifdef SUPPORT_CLASS
+				if (mrb_strcmp("new", func) == 0) {
+					intptr_t clsid = reg[a];
+					reg[a] = vm->nobject++;
+					mrb_memory_add(vm, reg[a], "_cls", clsid);
+
+					x_printf("new cls:%ld obj:%ld\n", clsid, reg[a]);
+					//x_printf("new %s %d\n", (const char*)reg[a], vm->nobject + MRB_OBJ_USER);
+//					const char* clsname = mrb_memory_findName(vm, MRB_OBJ_CONST, reg[a]);
+					intptr_t* finit = mrb_memory_find(vm, clsid, "initialize");
+					if (finit) {
+						/*
+						intptr_t reg2[3];
+						struct mrb_state state2 = { .parent = parent, .reg = reg2 };
+						intptr_t ret = 0;
+						reg2[0] = reg[a];
+						*/
+						irep_exec(vm, (const uint8_t*)finit[2], &state, a);
+					} else {
+						x_printf("no initilize func\n");
+					}
+					break;
+				}
+#endif
+				emb_method(vm, func, reg, a, c);
 				break;
 			case OP_SENDB: // VM needs to check count of parameters in OP_ENTER
 				a = *p++; b = *p++; c = *p++;
@@ -595,34 +721,45 @@ int irep_exec(struct mrb_vm* vm, const uint8_t* irep, struct mrb_state* parent, 
 				x_printf("r[%d] = range_new(r[%d],r[%d],TRUE)\n", a, a, a + 1);
 				break;
 #endif
+/*
+			case OP_ARGARY: // OPCODE(ARGARY,     BS)        R(a) = argument array (16=m5:r1:m5:d1:lv4)
+				a = *p++; b = *p++; b = (b << 8) + *p++;
+				int m1 = (b >> 11) & 0x3f;
+				int r  = (b >> 10) & 0x1;
+				int m2 = (b >> 5) & 0x1f;
+				int kd = (b >> 4) & 0x1;
+				int lv = b & 0xf;
+				x_printf("r[%d] = argument array(m1:%d, r:%d, m2:%d, kd:%d, lv:%d)\n", a, m1, r, m2, kd, lv);
+				break;
+				*/
+#ifdef SUPPORT_CLASS
+			case OP_CLASS: // OPCODE(CLASS,      BB)       /* R(a) = newclass(R(a),Syms(b),R(a+1)) */
+				a = *p++; b = *p++;
+				const char* cls = (const char*)(irep_get(irep, IREP_TYPE_SYMBOL, b) + 2);
+				x_printf("r[%d].newclass(r[%d], sym[%d], r[%d]) %s:nclass%d\n", a, a, b, a + 1, cls, vm->nmemory); // -> global const?
+				reg[a] = vm->nobject++; // object number
+				mrb_memory_add(vm, MRB_OBJ_CONST, cls, reg[a]);
+				break;
+			case OP_EXEC: // OPCODE(EXEC,       BB)       /* R(a) = blockexec(R(a),SEQ[b]) */
+				a = *p++; b = *p++;
+				x_printf("r[%d] = blockexec(r[%d]) at block:r[%d]\n", a, a, b);
+				const char* funce = (const char*)(irep_get(irep, IREP_TYPE_SYMBOL, b) + 2);
+				x_printf("funce:%s %d\n", funce, b);
+				const uint8_t* method = irep_get(irep, IREP_TYPE_IREP, b);
+				reg[a] = irep_exec(vm, method, &state, a);
+				break;
+#endif
 			case OP_DEF: // OPCODE(DEF,        BB)       /* R(a).newmethod(Syms(b),R(a+1)) */
 				a = *p++; b = *p++;
 				const char* funcm = (const char*)(irep_get(irep, IREP_TYPE_SYMBOL, b) + 2);
-				x_printf("r[%d].newmethod(sym[%d], r[%d]) %s:nmethod%d\n", a, b, a + 1, funcm, vm->nmethod);
-				int updatemethod = 0;
-				for (int i = 0; i < vm->nmethod; i++) {
-					if (mrb_strcmp(vm->methodsym[i], funcm) == 0) {
-						vm->methodirep[i] = reg[a + 1];
-						updatemethod = 1;
-//						x_printf("method updated\n");
-						break;
-					}
-				}
-				if (!updatemethod) {
-					if (vm->nmethod < MAX_USERDEF_METHOD) {
-						vm->methodsym[vm->nmethod] = funcm;
-						vm->methodirep[vm->nmethod] = reg[a + 1];
-						vm->nmethod++;
-					} else {
-						x_printf("exceed max method!!\n");
-						vm->err = MRB_ERR_EXCEED_MAX_METHOD;
-					}
-				}
+				x_printf("r[%d].newmethod(sym[%d], r[%d]) %s:nmethod%d\n", a, b, a + 1, funcm, vm->nmemory);
+				// class r]a] # 
+				mrb_memory_add(vm, reg[a], funcm, reg[a + 1]);
 				break;
 			case OP_TCLASS:
 				a = *p++;
-				reg[a] = (intptr_t)irep; // todo
-				x_printf("r[%d] = target_class\n", a);
+				reg[a] = reg[0]; // ??
+				x_printf("r[%d] = target_class %ld\n", a, reg[0]);
 				break;
 			case OP_STOP:
 				x_printf("stop\n");
@@ -665,4 +802,14 @@ intptr_t irep_atol(const char* s) {
 		n = n * 10 + (c - '0');
 	}
 	return flg ? -n : n;
+}
+int mrb_strcmp(const char* buf1, const char* buf2) {
+	for (;;) {
+		int n = *buf1++;
+		int c = n - *buf2++;
+		if (c)
+			return c;
+		if (!n)
+			return 0;
+	}
 }

@@ -10,7 +10,7 @@
 #define USE_STDIO
 #include "mruby_l1vm.h"
 
-void emb_method(struct mrb_vm* vm, const char* func, intptr_t* reg, int a) {
+void emb_method(struct mrb_vm* vm, const char* func, intptr_t* reg, int a, int paramlen) {
 	x_printf("emb_method %lx.%s\n", reg[a], func);
 	if (mrb_strcmp(func, "cls") == 0) {
 		x_printf("CLS\n");
