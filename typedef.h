@@ -14,6 +14,7 @@ typedef unsigned int uint32_t;
 
 #ifndef USE_STDIO
 typedef uint32_t uintptr_t;
+typedef int32_t intptr_t;
 #endif
 
 #define NULL 0

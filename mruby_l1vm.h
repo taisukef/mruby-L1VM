@@ -37,10 +37,10 @@ int mrb_strcmp(const char* buf1, const char* buf2);
 // option
 //#define SUPPORT_CONST
 //#define SUPPORT_CLASS
+//#define SUPPORT_ARRAY // need alloc/free
 
 // TBD options
 //#define SUPPORT_STRCAT // need alloc/free/strcat TBD
-//#define SUPPORT_ARRAY // TBD
 //#define SUPPORT_HASH // TBD
 //#define SUPPORT_RANGE // TBD
 //#define SUPPORT_OVER64KB // TBD
@@ -223,13 +223,13 @@ void showRegs(intptr_t* reg, int nregs) {
 }
 
 
-#ifdef SUPPORT_STRCAT
+#if defined(SUPPORT_STRCAT) || defined(SUPPORT_ARRAY)
 
-void* m_alloc(int size) {
+void* mrb_malloc(int size) {
 	x_printf("alloc %d\n", size);
 	return malloc(size);
 }
-void m_free(void* p) {
+void mrb_free(void* p) {
 	x_printf("free %ld\n", (intptr_t)p);
 	free(p);
 }
@@ -283,10 +283,8 @@ int mrb_memory_add(struct mrb_vm* vm, intptr_t obj, const char* name, intptr_t v
 	intptr_t* chk = mrb_memory_find(vm, obj, name);
 	if (chk) {
 		chk[2] = val;
-	x_printf("hit %ld\n", val);
 		return 1;
 	}
-	x_printf("nohit %ld\n", val);
 	if (vm->nmemory == MAX_USERDEF) {
 		x_printf("exceed max user object!!\n");
 		vm->err = MRB_ERR_EXCEED_MAX_USEROBJECT;
@@ -318,17 +316,32 @@ intptr_t irep_atol(const char* s);
 
 int irep_exec(struct mrb_vm* vm, const uint8_t* irep, struct mrb_state* parent, int paramreg);
 
-intptr_t num_times(struct mrb_vm* vm, intptr_t n, const uint8_t* irep, struct mrb_state* parent) {
+static inline intptr_t num_times(struct mrb_vm* vm, intptr_t n, const uint8_t* irep, struct mrb_state* parent) {
 	intptr_t reg[3];
 	struct mrb_state state = { .parent = parent, .reg = reg };
 	intptr_t ret = 0;
-	reg[1] = MRB_NIL;
+	reg[0] = MRB_NIL;
 	for (int i = 0; i < n; i++) {
-		reg[2] = i;
+		reg[1] = i;
 		ret = irep_exec(vm, irep, &state, 1);
 	}
 	return ret;
 }
+
+#ifdef SUPPORT_ARRAY
+static inline intptr_t array_each(struct mrb_vm* vm, intptr_t* ar, const uint8_t* irep, struct mrb_state* parent) {
+	intptr_t reg[3];
+	struct mrb_state state = { .parent = parent, .reg = reg };
+	intptr_t ret = 0;
+	reg[0] = MRB_NIL;
+	int n = ar[0];
+	for (int i = 0; i < n; i++) {
+		reg[1] = ar[i + 1];
+		ret = irep_exec(vm, irep, &state, 1);
+	}
+	return ret;
+}
+#endif
 
 void emb_method(struct mrb_vm* vm, const char* func, intptr_t* reg, int paramreg, int paramlen);
 
@@ -359,7 +372,12 @@ int irep_exec(struct mrb_vm* vm, const uint8_t* irep, struct mrb_state* parent, 
 	int opext = 0;
 	const uint8_t* porg = p;
 	reg[0] = paramreg ? parent->reg[paramreg] : MRB_OBJ_OBJECT; // self instance  0 means root object // vm->parentstate ? parentstate->caller : 0;
-	//x_printf("irep_exec self:%ld (%d)\n", reg[0], paramreg);
+	intptr_t* tclass = mrb_memory_find(vm, reg[0], "_cls");
+	if (tclass) {
+		x_printf("irep_exec self:%ld target_class:%ld (%d)\n", reg[0], tclass[2], paramreg);
+	} else {
+		x_printf("irep_exec self:%ld target_class:%d, (%d)\n", reg[0], 0, paramreg);
+	}
 	for (;;) {
 		x_printf("%3ld:%3d ", (intptr_t)(p - porg), *p);
 		uint8_t op = *p++;
@@ -371,7 +389,7 @@ int irep_exec(struct mrb_vm* vm, const uint8_t* irep, struct mrb_state* parent, 
 			case OP_MOVE:
 				a = *p++; b = *p++;
 				reg[a] = reg[b];
-				x_printf("r[%d] = r[%d]\n", a, b);
+				x_printf("r[%d] = r[%d] : %ld\n", a, b, reg[b]);
 				break;
 			case OP_LOADL:
 				a = *p++; b = *p++;
@@ -548,6 +566,20 @@ int irep_exec(struct mrb_vm* vm, const uint8_t* irep, struct mrb_state* parent, 
 					break;
 				}
 #endif
+#ifdef SUPPORT_ARRAY
+				if (mrb_strcmp("[]", func) == 0) {
+					intptr_t* ar = (intptr_t*)reg[a];
+					int n = reg[a + 1];
+					x_printf("array %ld[%ld] == %ld\n", ar, n, ar[n + 1]);
+					reg[a] = ar[n + 1];
+					break;
+				} else if (mrb_strcmp("size", func) == 0) {
+					intptr_t* ar = (intptr_t*)reg[a];
+					x_printf("array %ld.size == %ld\n", ar, ar[0]);
+					reg[a] = ar[0];
+					break;
+				}
+#endif
 				emb_method(vm, func, reg, a, c);
 				break;
 			case OP_SENDB: // VM needs to check count of parameters in OP_ENTER
@@ -560,14 +592,20 @@ int irep_exec(struct mrb_vm* vm, const uint8_t* irep, struct mrb_state* parent, 
 				x_printf("funcb:%s %ld\n", funcb, reg[a + 1]);
 				if (mrb_strcmp(funcb, "times") == 0) {
 					reg[a] = num_times(vm, reg[a], (const uint8_t*)reg[a + 1], &state);
+					break;
 				}
+#ifdef SUPPORT_ARRAY
+				if (mrb_strcmp(funcb, "each") == 0) {
+					reg[a] = array_each(vm, (intptr_t*)reg[a], (const uint8_t*)reg[a + 1], &state);
+				}
+#endif
 				break;
 			case OP_ENTER: // block parameters
 				a = *p++; a = (a << 8) | *p++; a = (a << 8) | *p++;
 				int nparam = a >> 18; // no checks now
 				for (int i = 0; i < nparam; i++) {
-					reg[i + 1] = parent->reg[i + paramreg];
-					x_printf("r[%d] = parent.reg[%d] (%ld) %d/%d\n", i + 1, i + paramreg, reg[i + 1], i, nparam);
+					reg[i + 1] = parent->reg[i + 1 + paramreg];
+					x_printf("r[%d] = parent.reg[%d] (%ld) %d/%d\n", i + 1, i + 1 + paramreg, reg[i + 1], i, nparam);
 				}
 				x_printf("enter %d:%d:%d:%d:%d:%d:%d\n", a >> 18, (a >> 13) & 0x1f, (a >> 12) & 1, (a >> 7) & 0x1f, (a >> 2) & 0x1f, (a >> 1) & 1, a & 1);
 				break;
@@ -637,7 +675,14 @@ int irep_exec(struct mrb_vm* vm, const uint8_t* irep, struct mrb_state* parent, 
 #ifdef SUPPORT_ARRAY
 			case OP_ARRAY: // 	OPCODE(ARRAY,      BB)       /* R(a) = ary_new(R(a),R(a+1)..R(a+b)) */
 				a = *p++; b = *p++;
-				x_printf("r[%d] = ary_new(r[%d]-r[%d])\n", a, a, a + b);
+				x_printf("r[%d] = ary_new(r[%d]-r[%d]) size:%ld\n", a, a, a + b, b);
+				intptr_t* nar = mrb_malloc(sizeof(intptr_t) * (b + 1));
+				nar[0] = b;
+				for (int i = 0; i < b; i++) {
+					x_printf("[%ld]=%ld\n", i, reg[a + i]);
+					nar[i + 1] = reg[a + i];
+				}
+				reg[a] = (intptr_t)nar;
 				break;
 			case OP_ARRAY2: //	OPCODE(ARRAY2,     BBB)      /* R(a) = ary_new(R(b),R(b+1)..R(b+c)) */ //  *rest使用時
 				a = *p++; b = *p++; c = *p++;
@@ -667,7 +712,7 @@ int irep_exec(struct mrb_vm* vm, const uint8_t* irep, struct mrb_state* parent, 
 #ifdef SUPPORT_STRCAT
 				const uint8_t* lit = irep_get(irep, IREP_TYPE_LITERAL, b);
 				int len = b2l2(lit + 1);
-				char* buf = m_alloc(len + 1);
+				char* buf = mrb_alloc(len + 1);
 				memcpy(buf, lit + 3, len);
 				buf[len] = 0;
 				reg[a] = (intptr_t)buf;
@@ -685,7 +730,7 @@ int irep_exec(struct mrb_vm* vm, const uint8_t* irep, struct mrb_state* parent, 
 				char* sc = m_alloc(newlen);
 				strcpy(sc, sa);
 				strcat(sc, sb);
-				m_free(sa);
+				mrb_free(sa);
 				reg[a] = (intptr_t)sc;
 				x_printf("strcat %s\n", sc);
 #endif

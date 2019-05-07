@@ -1,0 +1,93 @@
+<html>
+<head>
+<meta charset='utf-8'/>
+<title>mruby on web - under 4kb</title>
+<meta property="og:image" content="mrubyonweb.png">
+<link rel="apple-touch-icon" href="mrubyonweb.png"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no">
+<meta name="format-detection" content="telephone=no">
+
+<style>
+body {
+	margin-top: 5em;
+	font-family: sans-serif;
+	text-align: center;
+}
+#mes {
+	line-height: 2em;
+}
+#credit {
+	margin-top: 2em;
+	font-size: 80%;
+}
+a {
+	color: gray !important;
+}
+</style>
+<script>
+
+window.onload = function() {
+	let data
+	let ex
+
+	fetch("test-wasm.wasm") // over 4KB need runs on worker
+		.then(response => response.arrayBuffer())
+		.then(buffer => WebAssembly.compile(buffer))
+		.then(module => {
+			const asm = new WebAssembly.Instance(module)
+			const mem = asm.exports.memory.buffer
+			const memoffset = asm.exports.getMemory()
+			const memlen = asm.exports.getMemorySize()
+			data = new Uint8Array(mem, memoffset, memlen)
+			ex = asm.exports
+		})
+	
+	var drop = document.body
+	drop.addEventListener("dragover", function(e) {
+		e.preventDefault();
+	}, false)
+	drop.addEventListener("drop", function(e) {
+		var files = e.dataTransfer.files
+		var reader = new FileReader()
+		reader.onerror = function(e) {
+			alert("file read err")
+		}
+		reader.onload = function(e) {
+			let d = e.target.result
+			console.log("mrb size: " + d.byteLength)
+			console.log(d)
+			const ar = new Uint8Array(d, 0, d.byteLength)
+			droppedFile(ar)
+		}
+		reader.readAsArrayBuffer(files[0])
+		e.preventDefault();
+	}, false)
+
+	const droppedFile = function(ar) {
+		for (let i = 0; i < ar.length; i++) {
+			data[i] = ar[i]
+		}
+		const res = ex.exec()
+		alert(res)
+	}
+}
+
+</script>
+</head>
+<body>
+<h1>mruby on web - under 4kb</h1>
+
+<div id=mes>
+Drop here "mrb" file (ver 2.0) to run on mruby on web!<br>
+This minimum VM supported just simple calc only!<br>
+Modify yourself you like!<br>
+(If VM size exceeds 4KB, use <a href=test-wasm.html>test-wasm.html</a>)
+</div>
+
+<div id="credit">
+API: <a href=https://github.com/taisukef/mruby-L1VM>mruby-l1vm</a>, <a href=http://webassembly.org/>WebAssembly / wasm</a><br>
+APP: <a href="http://fukuno.jig.jp/2480">CC BY fukuno.jig.jp</a><br>
+</div>
+
+</body>
+</html>

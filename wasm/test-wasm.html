@@ -1,0 +1,84 @@
+<html>
+<head>
+<meta charset='utf-8'/>
+<title>WebAssembly test</title>
+<meta property="og:image" content="mrubyonweb-over4k.png">
+<link rel="apple-touch-icon" href="mrubyonweb-over4k.png"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no">
+<meta name="format-detection" content="telephone=no">
+
+<style>
+body {
+	margin-top: 5em;
+	font-family: sans-serif;
+	text-align: center;
+}
+#mes {
+	line-height: 2em;
+}
+#credit {
+	margin-top: 2em;
+	font-size: 80%;
+}
+a {
+	color: gray !important;
+}
+</style>
+<script>
+
+window.onload = function() {
+	var worker = new Worker("test-wasm-worker.js")
+	worker.postMessage({ type: "init" })
+
+	var drop = document.body
+	drop.addEventListener("dragover", function(e) {
+		e.preventDefault();
+	}, false)
+	drop.addEventListener("drop", function(e) {
+		var files = e.dataTransfer.files
+		var reader = new FileReader()
+		reader.onerror = function(e) {
+			alert("file read err")
+		}
+		reader.onload = function(e) {
+			let d = e.target.result
+			console.log("mrb size: " + d.byteLength)
+			console.log(d)
+			const ar = new Uint8Array(d, 0, d.byteLength)
+			worker.postMessage({ type: "exec", data: ar })
+		}
+		reader.readAsArrayBuffer(files[0])
+		e.preventDefault();
+	}, false)
+
+	worker.addEventListener('message', function(e) {
+		const m = e.data
+		if (m.type == "ready") {
+		} else if (m.type == "done") {
+			alert(m.data);
+		} else {
+			alert(m.data);
+		}
+	})
+}
+
+</script>
+</head>
+<body>
+<h1>mruby on web - over 4kb</h1>
+
+<div id=mes>
+Drop here "mrb" file (ver 2.0) to run on mruby on web!<br>
+This minimum VM supported just simple calc only!<br>
+Modify yourself you like!<br>
+(If VM size does not exceed 4KB, you can use <a href=index.html>without-worker version</a>)
+</div>
+
+<div id="credit">
+API: <a href=https://github.com/taisukef/mruby-L1VM>mruby-l1vm</a>, <a href=http://webassembly.org/>WebAssembly / wasm</a><br>
+APP: <a href="http://fukuno.jig.jp/2480">CC BY fukuno.jig.jp</a><br>
+</div>
+
+</body>
+</html>
+	

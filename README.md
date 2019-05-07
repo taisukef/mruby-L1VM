@@ -25,6 +25,9 @@ https://fukuno.jig.jp/2475
 Runs with IchigoJam BASIC!  
 https://fukuno.jig.jp/2476  
 
+mruby on web with WebAssembly  
+https://fukuno.jig.jp/2480  
+
 ## license
 
 MIT license  
